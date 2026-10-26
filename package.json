@@ -1,0 +1,17 @@
+{
+  "name": "generation-governor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A stream governor that refuses to hand on a permit until downstream termination is confirmed",
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
