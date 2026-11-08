@@ -2,7 +2,18 @@
 
 一个流治理器：**只有当传输真的停了，才把许可交给下一个请求。**
 
+> **English TL;DR**: A stream wrapper's `done` is not evidence that the underlying transport stopped. This repository contains a runnable TypeScript governor that refuses to release the next request until it sees a trusted terminal fact or a transport-owned quiescence probe. It ships 34 passing tests, an independently reviewed evidence chain, and five consecutive failures where a claim outran its implementation. No framework, no runtime dependency, no model call required.
+
 它不是"检测错误然后再试一次"的组件，而是一个把"结束"和"结束的声明"拆开的东西。
+
+---
+
+## 3 分钟判断这个仓库在干什么
+
+1. 读下面的「问题」：为什么 `done` 不等于 `stopped`。
+2. 读 [`docs/CASE-STUDY.zh.md`](docs/CASE-STUDY.zh.md)：五种缺陷形态、变异实验、红绿证据。
+3. 跑 `pnpm install && pnpm test`：34 个测试应该全过。
+4. 想继续深挖，再读 [`docs/audit/review-08.md`](docs/audit/review-08.md) 的独立核验结论。
 
 ---
 
@@ -19,7 +30,7 @@ Agent 运行时里有一句最难证伪的声明：**"任务完成了。"**
 这个仓库给出的是：**不信。** 只有在拿到可信的终局事实、或者传输自己给出的静默证据时，才释放。
 
 ```ts
-// 结束 ≠ 停止
+// 结束 != 停止
 if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
   // 这一条流的"结束"不是"完成"的证据
   // 不得据此确立 transport quiescence
@@ -34,8 +45,9 @@ if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.ki
 |---|---|
 | `src/governor.ts`（896 行） | 治理器本体：许可、排队、取消、静止确认、不可逆停止 |
 | `src/types.ts`（116 行） | 宿主类型的最小化版本，去掉唯一的外部依赖 |
-| `test/governor.spec.ts`（740 行，34 个测试） | 全部通过，使用会自己计数的 fake transport，而不是从许可推断 |
-| `docs/` | 不变量、三份 ADR、五份独立复核报告 |
+| `test/governor.spec.ts`（743 行，34 个测试） | 全部通过，使用会自己计数的 fake transport，而不是从许可推断 |
+| `docs/` | 不变量、三份 ADR、六份独立核验/审计报告、对抗复核案例 |
+| `docs/evidence/` | 总控变异校准实验的路径脱敏副本 |
 
 **零运行时依赖。** 开发依赖只有 `vitest` / `typescript` / `@types/node`。
 
@@ -47,21 +59,35 @@ pnpm typecheck # 0 errors
 
 ---
 
-## 为什么这个仓库值得读：五轮
+## 证据链：五个对象，一次收口
 
-这套东西的核心不是那份治理器，是它被审出来的过程。
+这套东西的核心不是那份治理器，是它被审出来的过程。对象链如下；私有宿主仓库的 SHA 是标识符，不声称读者能在公网复现整个宿主仓库，能独立复现的是本仓库的测试与下面列出的报告。
 
-我给它配了独立的复核者——一个只读、只攻击、不给面子的角色。然后连续五轮，**每一轮都抓到一个"声明说管住了、实际没管住"的地方**，而且每一轮换一张脸：
-
-| 轮次 | 缺陷是怎么活下来的 | 复核者给的裁决 |
+| 对象 | 裁决 | 抓到了什么 |
 |---|---|---|
-| 1 | 测试**把缺陷写成了断言**：一条用例直接断言"普通流错误也能确认静止" | REVISE |
-| 2 | 篡改矩阵 19/19 全绿，**少了 `[]` 那一条**（`[].every(...)` 恒为真） | BLOCKED |
-| 3 | 校验器只校验"所列文件"，**没有代码自有的期望集合**，删一个证据文件再重封即通过 | BLOCKED |
-| 4 | handoff 声明"14 个角色全部绑定"，**实际只有 2 个**，其余 12 个只有形状检查 | REVISE |
-| 5 | 覆盖表改成"由代码生成"了，但等级是**常量字面量**——它证明"角色在列表里"，不是"角色被检查过" | REVISE |
+| `GO41-04` @ `4235d813` | `REVISE` | 普通流错误被当成可信终止；测试还把缺陷写成了断言 |
+| `GO41-05` @ `f22141eb4c` | `BLOCKED` | `requestSessionHeaders = []` 通过 `.every()`；manifest 删除必需 journal 后重封仍通过 |
+| `GO41-06` @ `a4876ba7a1` | `REVISE` | 声明"14 个角色全部绑定"，实际只有 2 个有计数绑定 |
+| `GO41-07` @ `ebea03253b` | `REVISE` | 覆盖表由代码生成，但等级是常量字面量；总控变异实验证明降级一个角色后输出仍与正确实现相同 |
+| `GO41-08` @ `539eda0782` | `ACCEPT` | 等级改由绑定记录测量，calibration digest 纳入 coverage；独立核验 `blocking=0` |
 
-第 5 轮是这套流程第一次自己抓到自己的方法论：
+**`ACCEPTED` 只指本地证据链完整性可被代码自证。** 它不指产品收益、不指真实 provider 验收、不指 R6 A/B 通过。
+
+---
+
+## 为什么值得读：五种缺陷形态
+
+独立复核者只读、只攻击、不给面子。连续出现的不是五个普通 bug，而是同一个病根换了五张脸：**"我说我管住了"和"我真的管住了"之间没有强制连接。**
+
+| 形态 | 缺陷是怎么活下来的 |
+|---|---|
+| 1 | 测试**把缺陷写成了断言**：一条用例直接断言"普通流错误也能确认静止" |
+| 2 | 篡改矩阵 19/19 全绿，**少了 `[]` 那一条**（`[].every(...)` 恒为真） |
+| 3 | 校验器只校验"所列文件"，**没有代码自有的期望集合**，删一个证据文件再重封即通过 |
+| 4 | handoff 声明"14 个角色全部绑定"，**实际只有 2 个**，其余 12 个只有形状检查 |
+| 5 | 覆盖表改成"由代码生成"了，但等级是**常量字面量**——它证明"角色在列表里"，不是"角色被检查过" |
+
+第 5 种形态是这套流程第一次自己抓到自己的方法论：
 
 > 在仓库外复制一份代码，注入一行 `if (role === 'selfcheck/budget-0') continue`，让绑定静默少做一个角色。
 >
@@ -73,11 +99,11 @@ pnpm typecheck # 0 errors
 
 这不是"又一个 bug"。这是**仪表盘的指针被焊死在 100 码**——表是对的，但它证明的东西比它看起来少一层。
 
-复核报告原文在 `docs/audit/`，逐条 `CONFIRMED / REFUTED / UNPROVEN`，包括我自己被打回的部分。
+完整叙事、原始数字与复现入口见 [`docs/CASE-STUDY.zh.md`](docs/CASE-STUDY.zh.md)。六份核验报告原文在 `docs/audit/`，逐条 `CONFIRMED / REFUTED / UNPROVEN`，包括被打回的部分。
 
 ---
 
-## 从这五轮里提炼的两条方法
+## 从这些失败里提炼的两条方法
 
 ### 1. 先红后绿，而且必须是同一份伪造
 
@@ -85,7 +111,6 @@ pnpm typecheck # 0 errors
 
 ```
 ## variant: omission-full - RED (base f22141eb4c)
-[probe] repo=... head=f22141eb4c dirty=0
 [probe] variant=omission-full resealed: 13 files, 2 records; manifest=ea39c6fbc19e
 [validate] chain verified ... RC=0
 
@@ -97,7 +122,7 @@ pnpm typecheck # 0 errors
 
 **两相的 manifest 摘要逐字相同**，证明红相和绿相跑的是同一份伪造，只是换了校验器。没有这一行，"红了又绿了"可以有一百种解释，其中九十种是骗自己。
 
-红相必须在**未修改的实现**上跑，且工作树必须是干净的。
+红相必须在**未修改的实现**上跑，且工作树必须是干净的。路径已缩写的原始日志与六个变体见案例文档。
 
 ### 2. 声明类机制必须自带负校准
 
@@ -105,7 +130,7 @@ pnpm typecheck # 0 errors
 
 每个这类机制都要配一个负校准：**故意让机制自身失效，校验必须判负。** 校准跑不通，等于机制不存在。
 
-这条规则的来历：前四轮的缺陷形态各不相同，病根却是同一个——**"我说我管住了"和"我真的管住了"之间没有强制连接。**
+GO41-08 的做法是：同一行 `continue` 注入在旧实现上仍 `RC=0`，在新实现上变成 `13/14 + RC=1`，并让 coverage 进入 calibration digest。它还有一个"同码对照"：red / green 都指向旧实现时两边都 `RC=0`，证明差异不是注入本身造成的假阳性。
 
 ---
 
@@ -136,7 +161,7 @@ pnpm typecheck # 0 errors
 - **本地检查挡不住全量重算的伪造者。** 一个愿意把记录、manifest、链、journal 全部重新推导到自洽的人，任何本地校验都分不出来——摘要算法是公开的，期望值就在仓库里。要闭合这一层，需要外部锚（签名的 checkpoint、已发布的 SHA、或第三方时间戳）。
 - **进程退出仍无界。** 释放屏障不等于进程结束；底层 socket 持有句柄时，仍依赖 runner 的外部超时。
 - **没有接真实 provider。** 所有验证都跑在 fake transport 和本地端点上，不存在 live 调用。
-- **第 6 轮还没做完。** 覆盖等级正在从"常量"改成"观测记录"，结果未出。
+- **没有证明产品收益。** GO41-08 的 `ACCEPTED` 关闭的是证据完整性，不是 task success、cost、latency 或 false-completion 的改善。
 - **这不是一个通用 agent 框架。** 它只做一件事：不许把"结束的声明"当成"结束的事实"。
 
 ---
